@@ -85,4 +85,4 @@ if st.button("Generate Emotion Visual 🎨"):
 # Footer
 # -------------------------------
 st.write("---")
-st.caption("EmoCloud · Built with Streamlit · Designed by ChatGPT + You 💛")
+
