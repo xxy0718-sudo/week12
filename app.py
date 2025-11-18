@@ -1,7 +1,8 @@
 import streamlit as st
 from PIL import Image
 import random
-import os
+import requests
+from io import BytesIO
 
 # ---------------------------------
 # Setup
@@ -11,25 +12,50 @@ st.set_page_config(page_title="AI Museum Curator", layout="wide")
 st.title("🖼️ AI Museum Curator")
 st.write("Select artworks, choose a theme, and let the AI generate an exhibition.")
 
-st.markdown("## 1) Artwork Library")
+# ---------------------------------
+# Image loading function (fix for Streamlit Cloud)
+# ---------------------------------
+def load_image_from_url(url):
+    try:
+        response = requests.get(url, timeout=10)
+        img = Image.open(BytesIO(response.content))
+        return img
+    except:
+        return None
 
 # ---------------------------------
-# Load sample images
-# (You can replace these with your own files)
+# Artwork Library
 # ---------------------------------
 ARTWORKS = {
-    "Starry Night — Van Gogh": "https://upload.wikimedia.org/wikipedia/commons/e/ea/The_Starry_Night.jpg",
-    "Water Lilies — Monet": "https://upload.wikimedia.org/wikipedia/commons/8/8d/Claude_Monet_-_Water_Lilies_-_Google_Art_Project.jpg",
-    "The Scream — Munch": "https://upload.wikimedia.org/wikipedia/commons/f/f4/The_Scream.jpg",
-    "Girl with a Pearl Earring — Vermeer": "https://upload.wikimedia.org/wikipedia/commons/d/d7/Meisje_met_de_parel.jpg",
-    "Composition VII — Kandinsky": "https://upload.wikimedia.org/wikipedia/commons/0/0a/Kandinsky_Composition_VII.jpg"
+    "Starry Night — Van Gogh":
+        "https://upload.wikimedia.org/wikipedia/commons/e/ea/The_Starry_Night.jpg",
+
+    "Water Lilies — Monet":
+        "https://upload.wikimedia.org/wikipedia/commons/8/8d/Claude_Monet_-_Water_Lilies_-_Google_Art_Project.jpg",
+
+    "The Scream — Munch":
+        "https://upload.wikimedia.org/wikipedia/commons/f/f4/The_Scream.jpg",
+
+    "Girl with a Pearl Earring — Vermeer":
+        "https://upload.wikimedia.org/wikipedia/commons/d/d7/Meisje_met_de_parel.jpg",
+
+    "Composition VII — Kandinsky":
+        "https://upload.wikimedia.org/wikipedia/commons/0/0a/Kandinsky_Composition_VII.jpg"
 }
 
-# Display artworks as a grid
+# ---------------------------------
+# Display artworks grid
+# ---------------------------------
+st.markdown("## 1) Artwork Library")
+
 cols = st.columns(3)
 for i, (title, url) in enumerate(ARTWORKS.items()):
+    img = load_image_from_url(url)
     with cols[i % 3]:
-        st.image(url, caption=title, use_column_width=True)
+        if img:
+            st.image(img, caption=title, use_column_width=True)
+        else:
+            st.error(f"Failed to load image: {title}")
 
 # ---------------------------------
 # Selection
@@ -37,7 +63,11 @@ for i, (title, url) in enumerate(ARTWORKS.items()):
 st.markdown("## 2) Choose Artworks for Curation")
 selected = st.multiselect("Select artworks:", list(ARTWORKS.keys()))
 
-uploaded_files = st.file_uploader("Or upload your own artworks:", accept_multiple_files=True, type=["jpg","jpeg","png"])
+uploaded_files = st.file_uploader(
+    "Or upload your own artworks:",
+    accept_multiple_files=True,
+    type=["jpg", "jpeg", "png"]
+)
 
 # ---------------------------------
 # Themes
@@ -65,38 +95,43 @@ if st.button("Generate Exhibition"):
         st.markdown("## 🏛️ Your Exhibition")
         st.subheader(f"Theme: **{theme}**")
 
+        # ---------------------------------
+        # Display selected artworks
+        # ---------------------------------
         st.write("### Selected Artworks & Curatorial Notes")
 
-        # Display selected artworks
         for title in selected:
-            st.image(ARTWORKS[title], caption=title, use_column_width=True)
+            img = load_image_from_url(ARTWORKS[title])
+            if img:
+                st.image(img, caption=title, use_column_width=True)
+            else:
+                st.error(f"Failed to load: {title}")
 
-            # Generate AI-style curatorial text
             st.write(f"""
             **Curatorial Note for *{title}***  
-            This artwork connects to **{theme}** through its exploration of visual language, 
-            symbolic meaning, and emotional resonance.  
-            Its colors, composition, and historical context contribute to a deeper understanding 
-            of how artists express ideas within this theme.  
+            This artwork relates to **{theme}** through its visual and emotional qualities.  
+            Its color, composition, and symbolic meaning contribute to the thematic narrative.  
             """)
 
+        # ---------------------------------
         # Display uploaded artworks
+        # ---------------------------------
         for uploaded in uploaded_files:
             img = Image.open(uploaded)
             st.image(img, caption=uploaded.name, use_column_width=True)
 
             st.write(f"""
             **Curatorial Note for *{uploaded.name}***  
-            This piece reflects the exhibition theme **{theme}**, revealing layers of 
-            interpretation through texture, tone, and subject matter.  
-            Its visual qualities allow viewers to experience the theme from a personal and 
-            contemporary perspective.  
+            This work offers a personal interpretation of the theme **{theme}**, 
+            reflecting unique textures, tones, and visual storytelling.  
             """)
 
-        # Exhibition layout
+        # ---------------------------------
+        # Exhibition Layout
+        # ---------------------------------
         st.write("### Exhibition Layout (Auto-generated)")
-
         room_count = random.randint(2, 4)
+
         st.write(f"🗺️ **Gallery Layout — {room_count} Rooms**")
 
         for i in range(room_count):
@@ -108,3 +143,4 @@ if st.button("Generate Exhibition"):
             """)
 
         st.success("Exhibition generated successfully!")
+
