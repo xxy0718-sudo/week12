@@ -1,187 +1,270 @@
+# app.py
 import streamlit as st
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon, Circle
+import io
+import os
+import base64
 import random
-from io import BytesIO
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+import numpy as np
+
+# Optional OpenAI: used only if key provided
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except Exception:
+    OPENAI_AVAILABLE = False
 
 # -----------------------
 # Page config
 # -----------------------
-st.set_page_config(page_title="Generative Poster 2.0", layout="centered")
-st.title("🎨 Generative Poster 2.0")
-st.write("Interactive generative poster studio — tweak parameters, preview, and download high-resolution PNGs.")
+st.set_page_config(page_title="Generative Studio", layout="wide")
+st.title("🎨 Generative Studio — AI-Assisted Art Creation & Prompt Lab")
+st.write("Craft prompts, generate images (OpenAI DALL·E if API key present), iterate, and curate a portfolio.")
 
 # -----------------------
-# Utility: palettes
+# Sidebar: keys & settings
 # -----------------------
-PALETTES = {
-    "Pastel Minimal": [(255,179,186),(255,223,186),(255,255,186),(186,255,201),(186,225,255)],
-    "Vivid": [(255,153,153),(255,204,153),(255,255,153),(153,255,204),(153,204,255)],
-    "Noisetouch": [(230,180,180),(230,210,180),(230,230,180),(180,230,210),(180,210,230)],
-    "Monochrome": [(50,50,60),(80,80,100),(120,120,140),(160,160,180),(200,200,220)],
-    "Neon": [(255,0,102),(0,204,255),(255,204,0),(153,0,255),(0,255,153)]
-}
+st.sidebar.header("Settings & API")
+openai_key = st.sidebar.text_input("OpenAI API Key (optional)", type="password",
+                                   help="Paste your OpenAI API key here or set OPENAI_API_KEY in Streamlit Secrets for deployment.")
+use_openai = False
+if openai_key:
+    if OPENAI_AVAILABLE:
+        openai.api_key = openai_key.strip()
+        use_openai = True
+    else:
+        st.sidebar.error("openai package not installed in environment. Fallback to local generator.")
+else:
+    # try secrets
+    try:
+        key_from_secrets = st.secrets["OPENAI_API_KEY"]
+        if OPENAI_AVAILABLE:
+            openai.api_key = key_from_secrets
+            use_openai = True
+            st.sidebar.write("Using OpenAI key from Streamlit Secrets.")
+        else:
+            st.sidebar.info("OpenAI SDK not installed; local fallback will be used.")
+    except Exception:
+        pass
 
-def norm_color(rgb, alpha=1.0):
-    r,g,b = rgb
-    return (r/255, g/255, b/255, alpha)
-
-# -----------------------
-# Element generators
-# -----------------------
-def draw_irregular_blob(ax, cx, cy, radius, color, points=120, max_offset=0.12, z=1, alpha=0.6):
-    angles = np.linspace(0, 2*np.pi, points, endpoint=False)
-    xs, ys = [], []
-    for a in angles:
-        off = random.uniform(-max_offset, max_offset) * radius
-        r = radius + off
-        xs.append(cx + r * np.cos(a))
-        ys.append(cy + r * np.sin(a))
-    poly = Polygon(np.column_stack([xs, ys]), closed=True, color=color, zorder=z, ec=None)
-    ax.add_patch(poly)
-
-def draw_spiky(ax, cx, cy, radius, spikes=24, irregularity=0.6, color=(0,0,0,0.7), z=1, alpha=0.7):
-    angles = np.linspace(0, 2*np.pi, spikes, endpoint=False)
-    xs, ys = [], []
-    for a in angles:
-        r = radius * (1 + np.random.uniform(-irregularity, irregularity))
-        xs.append(cx + r * np.cos(a))
-        ys.append(cy + r * np.sin(a))
-    poly = Polygon(np.column_stack([xs, ys]), closed=True, color=color, zorder=z)
-    ax.add_patch(poly)
-
-def draw_gradient_background(ax, width, height, c1, c2):
-    # simple vertical gradient via imshow
-    grad = np.linspace(0,1,256).reshape(256,1)
-    img = np.zeros((256, 1, 4))
-    for i in range(3):
-        img[:,0,i] = (1-grad) * c1[i] + grad * c2[i]
-    img[:,0,3] = 1.0
-    ax.imshow(np.repeat(img, 4*width, axis=1), extent=[0,width,0,height], origin='lower', zorder=0)
+st.sidebar.markdown("---")
+st.sidebar.header("Output & Gallery")
+gallery_capacity = st.sidebar.slider("Gallery capacity", 3, 30, 12)
+export_zip = st.sidebar.checkbox("Enable export ZIP for downloaded images", True)
 
 # -----------------------
-# Poster generator
+# Prompt builder UI
 # -----------------------
-def generate_poster(width=800, height=1200, n_layers=25, style="Pastel Minimal", seed=None,
-                    mode="Blobs", gradient=True, noise=False, shadow=True):
-    if seed is not None:
+st.subheader("1) Prompt Builder")
+
+col_a, col_b, col_c = st.columns([3,2,2])
+
+with col_a:
+    subject = st.text_input("Subject / Main motif", "A lone figure under a neon umbrella")
+    style = st.selectbox("Style", ["photorealistic", "oil painting", "watercolor", "digital art", "surrealist", "collage"])
+    mood = st.selectbox("Mood / Emotion", ["melancholy", "joyful", "mysterious", "calm", "tense"])
+    details = st.text_area("Extra details (composition, lighting, camera)", "three-quarter view, cinematic lighting, shallow depth of field")
+
+with col_b:
+    color_palette = st.selectbox("Color palette", ["pastel", "neon", "muted", "warm", "cool", "monochrome"])
+    composition = st.selectbox("Composition hint", ["close-up portrait", "wide landscape", "centered subject", "rule of thirds"])
+    aspect = st.selectbox("Aspect ratio", ["4:5 (portrait)", "1:1 (square)", "16:9 (landscape)"])
+
+with col_c:
+    # guidance for prompt engineering
+    st.markdown("**Prompt engineering tips**")
+    st.markdown("- Add a few concrete style references (e.g., 'in the style of Vermeer' or 'cinematic, 35mm film').")
+    st.markdown("- Mention lighting and material properties (e.g., 'soft rim light', 'matte paper texture').")
+    st.markdown("- Use adjectives for mood and clarity.")
+
+# assembled prompt preview
+base_prompt = f"{subject}, {style}, mood: {mood}, colors: {color_palette}, composition: {composition}, {details}"
+st.markdown("**Prompt preview:**")
+st.code(base_prompt, language="text")
+
+# seed and attempts
+col_seed, col_attempts = st.columns(2)
+with col_seed:
+    seed = st.number_input("Seed (0 = random)", min_value=0, value=0, step=1)
+with col_attempts:
+    n_variations = st.slider("Variations to generate", 1, 6, 3)
+
+# -----------------------
+# Local procedural generator (fallback)
+# -----------------------
+def procedural_mock_image(prompt_text, w=1024, h=1024, seed=None, palette="pastel"):
+    if seed and seed > 0:
         random.seed(seed)
         np.random.seed(seed)
-
-    # Matplotlib figure sized in inches (dpi later)
-    dpi = 100
-    fig_w, fig_h = width / dpi, height / dpi
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
-    ax.set_xlim(0, width)
-    ax.set_ylim(0, height)
-    ax.axis('off')
-
-    # Background
-    palette = PALETTES.get(style, PALETTES["Pastel Minimal"])
-    c1 = np.array(palette[0]) / 255.0
-    c2 = np.array(palette[-1]) / 255.0
-    if gradient:
-        draw_gradient_background(ax, width, height, c1, c2)
     else:
-        ax.set_facecolor(c1)
+        random.seed()
+        np.random.seed()
 
-    # draw shapes
-    for i in range(n_layers):
-        cx = random.uniform(0.05*width, 0.95*width)
-        cy = random.uniform(0.05*height, 0.95*height)
-        base_r = random.uniform(0.06*min(width,height), 0.22*min(width,height))
-        color_choice = random.choice(palette)
-        alpha = random.uniform(0.35, 0.85)
-        color = norm_color(color_choice, alpha=alpha)
+    # generate simple abstract composition using PIL
+    img = Image.new("RGBA", (w, h), (255,255,255,255))
+    draw = ImageDraw.Draw(img)
 
-        # shadow layer
-        if shadow and random.random() < 0.6:
-            # draw faint shadow offset
-            draw_irregular_blob(ax, cx+base_r*0.08, cy-base_r*0.08, base_r*1.02,
-                                norm_color((0,0,0), alpha=0.12), points=120, max_offset=0.18, z=0)
+    # palette choices
+    PALETTES = {
+        "pastel": [(255,179,186),(255,223,186),(255,255,186),(186,255,201),(186,225,255)],
+        "neon": [(255,0,102),(0,204,255),(255,204,0),(153,0,255),(0,255,153)],
+        "muted": [(150,120,120),(120,140,130),(130,120,160),(180,170,160)],
+        "warm": [(255,179,102),(255,120,60),(220,80,40),(180,40,20)],
+        "cool": [(80,160,200),(50,100,150),(30,60,100),(20,40,70)],
+        "monochrome": [(30,30,40),(70,70,90),(110,110,130),(160,160,180)]
+    }
+    colors = PALETTES.get(palette, PALETTES["pastel"])
 
-        if mode == "Blobs":
-            max_offset = random.uniform(0.03, 0.16)
-            draw_irregular_blob(ax, cx, cy, base_r, color, points=140, max_offset=max_offset, z=2, alpha=alpha)
-            # some smaller overlay blobs
-            if random.random() < 0.35:
-                draw_irregular_blob(ax, cx + random.uniform(-base_r, base_r)/2,
-                                    cy + random.uniform(-base_r, base_r)/2,
-                                    base_r * random.uniform(0.4, 0.8),
-                                    norm_color(random.choice(palette), alpha=alpha*0.9),
-                                    points=120, max_offset=random.uniform(0.02,0.12), z=3)
-        else:  # Spiky
-            spikes = random.randint(18, 48)
-            draw_spiky(ax, cx, cy, base_r*1.1, spikes=spikes,
-                       irregularity=random.uniform(0.2,0.8), color=norm_color(color_choice, alpha=alpha), z=3)
+    # background gradient
+    bg1 = colors[0]
+    bg2 = colors[-1]
+    for i in range(h):
+        t = i / h
+        r = int((1-t)*bg1[0] + t*bg2[0])
+        g = int((1-t)*bg1[1] + t*bg2[1])
+        b = int((1-t)*bg1[2] + t*bg2[2])
+        draw.line([(0,i),(w,i)], fill=(r,g,b,255))
 
-    # optional noise overlay
-    if noise:
-        arr = np.random.normal(loc=0.0, scale=0.08, size=(int(height/2), int(width/2), 1))
-        # tile into RGBA subtle gray
-        img = np.concatenate([arr*0 + 0.5, arr*0 + 0.5, arr*0 + 0.5, arr*0 + 0.1], axis=2)
-        ax.imshow(img, extent=[0,width,0,height], zorder=10, origin='lower')
+    # draw blobs
+    n_blobs = random.randint(6,18)
+    for i in range(n_blobs):
+        rx = random.randint(int(0.05*w), int(0.95*w))
+        ry = random.randint(int(0.05*h), int(0.95*h))
+        r = random.randint(int(0.06*min(w,h)), int(0.22*min(w,h)))
+        color = random.choice(colors)
+        alpha = random.randint(120,220)
+        # draw many layered ellipses to create soft shapes
+        layer = Image.new("RGBA", (w,h), (255,255,255,0))
+        ld = ImageDraw.Draw(layer)
+        for rr in range(r, int(r*0.2), -int(r*0.1) if r>10 else -1):
+            bbox = [rx-rr, ry-rr, rx+rr, ry+rr]
+            lc = (color[0], color[1], color[2], int(alpha * (rr/(r+1))))
+            ld.ellipse(bbox, fill=lc)
+        # blur layer slightly
+        layer = layer.filter(ImageFilter.GaussianBlur(radius=random.uniform(6,18)))
+        img = Image.alpha_composite(img, layer)
 
-    # Title text area (small)
-    ax.text(0.03*width, 0.92*height, "Generative Poster 2.0", fontsize=round(width*0.03), fontweight='bold', color='black', zorder=20)
-    ax.text(0.03*width, 0.88*height, "Algorithmic Posters • By You", fontsize=round(width*0.015), zorder=20)
+    # add text annotation (the prompt shortened)
+    try:
+        fnt = ImageFont.truetype("DejaVuSans.ttf", size=28)
+    except Exception:
+        fnt = ImageFont.load_default()
+    text = (prompt_text[:120] + '...') if len(prompt_text) > 120 else prompt_text
+    draw = ImageDraw.Draw(img)
+    txt_w, txt_h = draw.textsize(text, font=fnt)
+    draw.rectangle([(10, h-10-txt_h-10), (10+txt_w+12, h-10)], fill=(255,255,255,200))
+    draw.text((16, h-10-txt_h-6), text, fill=(30,30,40,255), font=fnt)
 
-    plt.tight_layout(pad=0)
-    return fig
+    return img.convert("RGB")
 
 # -----------------------
-# Streamlit UI controls
+# Image generation function (OpenAI Image API)
 # -----------------------
-st.sidebar.header("Poster Settings")
-preset = st.sidebar.selectbox("Preset / Style",
-                              ["Soft Bloom (Pastel Minimal)", "Noisetouch", "Vivid Neon", "Spiky Tension", "Monochrome Calm"])
-# map preset to settings
-if preset.startswith("Soft"):
-    style = "Pastel Minimal"; mode = "Blobs"; gradient = True; noise=False
-elif preset.startswith("Noisetouch"):
-    style = "Noisetouch"; mode = "Blobs"; gradient=True; noise=True
-elif preset.startswith("Vivid"):
-    style = "Neon"; mode = "Blobs"; gradient=False; noise=False
-elif preset.startswith("Spiky"):
-    style = "Vivid"; mode = "Spiky"; gradient=False; noise=False
+def generate_with_openai(prompt_text, size="1024x1024", n=1):
+    # This function requires openai.api_key to be set and openai package installed.
+    try:
+        resp = openai.Image.create(prompt=prompt_text, n=n, size=size)
+        images = []
+        for item in resp['data']:
+            b64 = item['b64_json']
+            img = Image.open(io.BytesIO(base64.b64decode(b64)))
+            images.append(img.convert("RGB"))
+        return images
+    except Exception as e:
+        st.error(f"OpenAI generation error: {e}")
+        return []
+
+# -----------------------
+# Generate / iterate controls
+# -----------------------
+st.subheader("2) Generate & Iterate")
+
+generate_col1, generate_col2 = st.columns([1,1])
+with generate_col1:
+    if st.button("Generate Images"):
+        # ensure prompt built
+        prompt = base_prompt
+        gallery = st.session_state.get("gallery", [])
+        new_images = []
+
+        # decide palette param for procedural fallback
+        palette_param = color_palette = color_palette if 'color_palette' in locals() else "pastel"
+        # generate variations
+        for i in range(n_variations):
+            this_seed = seed + i if seed and seed>0 else random.randint(1, 2**31-1)
+            if use_openai:
+                st.info(f"Generating variation {i+1} with OpenAI (seed {this_seed})...")
+                imgs = generate_with_openai(prompt, size="1024x1024", n=1)
+                if imgs:
+                    img = imgs[0]
+                else:
+                    st.warning("Falling back to local generator for this variation.")
+                    img = procedural_mock_image(prompt, w=1024, h=1024, seed=this_seed, palette=palette_param)
+            else:
+                st.info(f"Generating variation {i+1} locally (seed {this_seed})...")
+                img = procedural_mock_image(prompt, w=1024, h=1024, seed=this_seed, palette=palette_param)
+            # store image & metadata in gallery
+            metadata = {"prompt": prompt, "seed": this_seed, "style": style, "mood": mood, "palette": color_palette}
+            img_bytes = io.BytesIO()
+            img.save(img_bytes, format="PNG")
+            img_bytes.seek(0)
+            gallery.insert(0, {"image_bytes": img_bytes.getvalue(), "meta": metadata})
+            # cap gallery
+            if len(gallery) > gallery_capacity:
+                gallery = gallery[:gallery_capacity]
+            new_images.append(img)
+        # save session state
+        st.session_state["gallery"] = gallery
+        st.success(f"{len(new_images)} images generated and added to gallery.")
+
+with generate_col2:
+    if st.button("Clear Gallery"):
+        st.session_state["gallery"] = []
+        st.success("Gallery cleared.")
+
+# -----------------------
+# 3) Gallery & Export
+# -----------------------
+st.subheader("3) Gallery")
+gallery = st.session_state.get("gallery", [])
+if not gallery:
+    st.info("No images in gallery yet — generate some above.")
 else:
-    style = "Monochrome"; mode = "Blobs"; gradient=True; noise=False
-
-n_layers = st.sidebar.slider("Number of layers", 6, 80, 28)
-seed = st.sidebar.number_input("Seed (for reproducible outputs)", min_value=0, value=42)
-width_px = st.sidebar.selectbox("Canvas width (px)", [800, 1200, 1600], index=0)
-height_px = st.sidebar.selectbox("Canvas height (px)", [1100, 1400, 1800], index=0)
-show_shadow = st.sidebar.checkbox("Enable subtle shadows", True)
-enable_noise = st.sidebar.checkbox("Enable texture noise", noise)
-custom_palette = st.sidebar.selectbox("Palette", list(PALETTES.keys()), index=list(PALETTES.keys()).index(style) if style in PALETTES else 0)
-
-# generate button
-if st.button("Generate Poster"):
-    fig = generate_poster(width=width_px, height=height_px, n_layers=n_layers,
-                          style=custom_palette, seed=seed, mode=mode,
-                          gradient=gradient, noise=enable_noise, shadow=show_shadow)
-    st.pyplot(fig, bbox_inches='tight')
-
-    # Download high-resolution PNG
-    buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=300, bbox_inches='tight')
-    buf.seek(0)
-    st.download_button("Download PNG (high-res)", data=buf, file_name=f"poster_seed{seed}.png", mime="image/png")
-
-    # show small preview thumbnails (3 variations)
-    st.subheader("Variations (same settings, different seeds)")
+    # display gallery with simple controls
     cols = st.columns(3)
-    for i, col in enumerate(cols):
-        s = seed + i + 1
-        f = generate_poster(width=400, height=600, n_layers=max(8,int(n_layers/2)),
-                            style=custom_palette, seed=s, mode=mode, gradient=gradient, noise=enable_noise, shadow=show_shadow)
-        buf2 = BytesIO()
-        f.savefig(buf2, format="png", dpi=150, bbox_inches='tight')
-        buf2.seek(0)
-        col.image(buf2)
+    for idx, item in enumerate(gallery):
+        col = cols[idx % 3]
+        img = Image.open(io.BytesIO(item["image_bytes"]))
+        col.image(img, use_column_width=True)
+        col.markdown(f"**Seed:** {item['meta']['seed']}")
+        col.markdown(f"**Prompt:** {item['meta']['prompt'][:80]}...")
+        # download single image
+        btn_key = f"dl_{idx}"
+        col.download_button(label="Download PNG", data=item["image_bytes"],
+                            file_name=f"gen_{item['meta']['seed']}.png", mime="image/png", key=btn_key)
 
-# Quick info & credits
+# export zip
+if export_zip and gallery:
+    import zipfile, tempfile
+    if st.button("Export Gallery as ZIP"):
+        with tempfile.TemporaryFile() as tmpf:
+            with zipfile.ZipFile(tmpf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for i, itm in enumerate(gallery):
+                    zf.writestr(f"image_{i+1}_seed{itm['meta']['seed']}.png", itm["image_bytes"])
+            tmpf.seek(0)
+            st.download_button("Download ZIP", data=tmpf.read(), file_name="gallery.zip", mime="application/zip")
+
+# -----------------------
+# 4) Prompt notebook & advise
+# -----------------------
+st.subheader("4) Prompt Notebook & Tips")
+st.markdown("- Try swapping the style and mood fields to see strong changes in outputs.")
+st.markdown("- Use seeds to reproduce favorites. Seed 0 = fully random.")
+st.markdown("- Keep prompt length clear: subject → style → mood → colors → composition → reference artists.")
+st.markdown("- Example prompt: 'A melancholic neon city street, cinematic lighting, shallow depth of field, in the style of a futuristic noir poster.'")
+
+# -----------------------
+# Footer
+# -----------------------
 st.markdown("---")
-st.markdown("**How to use**: choose a preset or palette, tweak the layer count and canvas size, set a seed to reproduce results, then press **Generate Poster**. Use the download button to get a high-resolution PNG.")
-st.caption("Generative Poster 2.0 • Designed for final project • Code by you + ChatGPT")
+st.caption("Generative Studio • Designed for creative experimentation. Save seeds and prompts to reproduce your favorite outputs.")
